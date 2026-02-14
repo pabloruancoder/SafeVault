@@ -13,8 +13,9 @@ import datetime
 import tkinter as tk
 import webbrowser
 import threading
+import ctypes 
 from tkinter import font, colorchooser, filedialog
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 
 from cryptography.fernet import Fernet
@@ -43,12 +44,15 @@ C_DANGER = ("#EB5757", "#CF6679")
 
 class IconAssets:
     @staticmethod
-    def get_image(name):
+    def get_image(name, color=None):
         size = (24, 24)
         img = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         fill = (255, 255, 255, 255)
         
+        if color:
+            fill = color
+
         try:
             if name == "trash":
                 draw.rectangle([7, 8, 17, 20], outline=fill, width=2)
@@ -111,6 +115,9 @@ class IconAssets:
                 draw.line([6, 6, 14, 6], fill=fill, width=2)
             else:
                 draw.text((8, 4), "?", fill=fill)
+
+            if color:
+                return img
 
             alpha = img.split()[3]
             icon_white = Image.new("RGBA", size, (255, 255, 255, 255))
@@ -368,8 +375,6 @@ class NotionVaultV8(ctk.CTk):
         ctk.set_appearance_mode("System") 
         ctk.set_default_color_theme("dark-blue")
 
-        
-        
         app_name = "SafeVault"
         if os.name == 'nt': 
             self.app_data_dir = os.path.join(os.environ['APPDATA'], app_name)
@@ -385,26 +390,41 @@ class NotionVaultV8(ctk.CTk):
         self.expanded_folders = set()
         self.editing_id = None 
         
-        
         self.init_db()
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        
+        # --- Title Bar ---
         self.title_bar = ctk.CTkFrame(self, height=35, corner_radius=0, fg_color=C_BG_SIDEBAR)
         self.title_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.lbl_icon = ctk.CTkLabel(self.title_bar, text="", image=IconAssets.get_image("lock"))
         self.lbl_icon.pack(side="left", padx=(15, 5))
         self.lbl_app = ctk.CTkLabel(self.title_bar, text="SafeVault / Workspace", text_color=C_TEXT_DIM, font=("Segoe UI", 12))
         self.lbl_app.pack(side="left")
+        
+        # --- ESTADO INICIAL DE TELA CHEIA ---
+        self.is_fullscreen = False
+        self.last_geometry = "1200x800"
+
+        # Botão Fechar
         self.btn_close = ctk.CTkButton(self.title_bar, text="✕", width=35, height=35, fg_color="transparent", hover_color=C_BORDER, text_color=C_TEXT_DIM, command=self.close_app)
         self.btn_close.pack(side="right")
+        
+        # Botão Maximizar / Restaurar (NOVO)
+        self.btn_max = ctk.CTkButton(self.title_bar, text="□", width=35, height=35, fg_color="transparent", hover_color=C_BORDER, text_color=C_TEXT_DIM, command=self.toggle_fullscreen)
+        self.btn_max.pack(side="right")
+
+        # Botão Minimizar
+        self.btn_min = ctk.CTkButton(self.title_bar, text="—", width=35, height=35, fg_color="transparent", hover_color=C_BORDER, text_color=C_TEXT_DIM, command=self.minimize_app)
+        self.btn_min.pack(side="right")
+
         self.title_bar.bind("<Button-1>", self.start_move)
         self.title_bar.bind("<B1-Motion>", self.do_move)
 
-        
-        self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=C_BG_SIDEBAR)
+        # --- Sidebar (Largura Aumentada e Redimensionável) ---
+        self.sidebar_width = 280 
+        self.sidebar = ctk.CTkFrame(self, width=self.sidebar_width, corner_radius=0, fg_color=C_BG_SIDEBAR)
         self.sidebar.grid(row=1, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
 
@@ -426,18 +446,33 @@ class NotionVaultV8(ctk.CTk):
         btn_add_folder = ctk.CTkButton(folder_header, text="+", width=20, height=20, fg_color="transparent", hover_color=C_HOVER, text_color=C_TEXT_DIM, command=lambda: self.popup_add_folder(None))
         btn_add_folder.pack(side="right")
 
+        # Campo de Pesquisa de Pasta
+        self.entry_folder_search = ctk.CTkEntry(self.sidebar, placeholder_text="Filtrar pastas...", height=28, 
+                                                font=("Segoe UI", 12), fg_color="transparent", border_color=C_BORDER, border_width=1)
+        self.entry_folder_search.pack(fill="x", padx=15, pady=(0, 5))
+        self.entry_folder_search.bind("<KeyRelease>", lambda e: self.load_folders_sidebar())
+
         self.folder_scroll = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
         self.folder_scroll.pack(fill="both", expand=True, padx=5, pady=5)
 
         ctk.CTkFrame(self.sidebar, height=1, fg_color=C_BORDER).pack(fill="x")
-        self.create_menu_btn("  Lixeira", "trash", lambda: self.switch_page("trash"), parent=self.sidebar)
-        self.create_menu_btn("  Tema / Backup", "settings", self.open_settings, parent=self.sidebar)
+        
+        # --- MENU ATUALIZADO ---
+        self.create_menu_btn("  Configurações", "settings", lambda: self.switch_page("settings"), parent=self.sidebar)
         self.create_menu_btn("  Bloquear", "lock", self.lock_app, parent=self.sidebar)
+
+        # Barra de Redimensionamento
+        self.resizer_bar = ctk.CTkFrame(self.sidebar, width=5, cursor="sb_h_double_arrow", fg_color="transparent")
+        self.resizer_bar.place(relx=1.0, rely=0, relheight=1.0, anchor="ne")
+        self.resizer_bar.bind("<Button-1>", self.start_resize_sidebar)
+        self.resizer_bar.bind("<B1-Motion>", self.do_resize_sidebar)
+        self.resizer_bar.bind("<Enter>", lambda e: self.resizer_bar.configure(fg_color=C_ACCENT))
+        self.resizer_bar.bind("<Leave>", lambda e: self.resizer_bar.configure(fg_color="transparent"))
 
         self.content = ctk.CTkFrame(self, corner_radius=0, fg_color=C_BG_MAIN)
         self.content.grid(row=1, column=1, sticky="nsew", padx=40, pady=20)
 
-        
+        # Resize grip for main window
         self.sizegrip = ctk.CTkLabel(self, text="◢", text_color=C_TEXT_DIM, font=("Arial", 16), cursor="sizing")
         self.sizegrip.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
         self.sizegrip.bind("<B1-Motion>", self.resize_window)
@@ -445,6 +480,55 @@ class NotionVaultV8(ctk.CTk):
         if not os.path.exists(self.security_file): self.show_register()
         else: self.show_login()
 
+        # Configurar ícone na barra de tarefas (Windows)
+        self.after(200, self.setup_taskbar)
+
+    def setup_taskbar(self):
+        try:
+            # Gera um ícone azul (cadeado)
+            icon_img = IconAssets.get_image("lock", color=(35, 131, 226, 255))
+            if icon_img:
+                photo_icon = ImageTk.PhotoImage(icon_img)
+                self.iconphoto(False, photo_icon)
+        except: pass
+
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            if hwnd == 0: hwnd = self.winfo_id()
+            
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, -20) # GWL_EXSTYLE
+            style = style & ~0x00000080 # Remove WS_EX_TOOLWINDOW
+            style = style | 0x00040000  # Adiciona WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, -20, style)
+            
+            self.withdraw()
+            self.after(10, self.deiconify)
+        except: pass
+
+    # --- CORREÇÃO DO MINIMIZAR ---
+    def minimize_app(self):
+        self.withdraw() # Esconde a janela
+        self.overrideredirect(False) # Devolve o controle para o Windows
+        self.iconify() # Minimiza de verdade
+        self.bind("<Map>", self.on_restore) # Fica ouvindo quando ela voltar
+
+    def on_restore(self, event):
+        # Quando a janela for restaurada (mapeada na tela de novo)
+        if self.state() == 'normal':
+            self.overrideredirect(True) # Tira as bordas do Windows
+            self.setup_taskbar() # Garante que o ícone continue na barra
+            self.unbind("<Map>") # Para de ouvir o evento
+
+    # --- Funções de Redimensionamento do Menu ---
+    def start_resize_sidebar(self, event):
+        pass
+
+    def do_resize_sidebar(self, event):
+        # Calcula largura baseada em coordenada absoluta para evitar "snap back"
+        new_width = event.x_root - self.winfo_rootx()
+        if 150 < new_width < 800:
+            self.sidebar_width = new_width
+            self.sidebar.configure(width=self.sidebar_width)
     
     def toggle_folder_state(self, folder_id):
         if folder_id in self.expanded_folders: 
@@ -455,56 +539,77 @@ class NotionVaultV8(ctk.CTk):
 
     def load_folders_sidebar(self):
         for w in self.folder_scroll.winfo_children(): w.destroy()
+        
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
-        
         c.execute("SELECT id, name, parent_id FROM folders WHERE is_deleted=0 ORDER BY name")
         all_folders = c.fetchall()
         conn.close()
 
+        search_query = self.entry_folder_search.get().lower().strip()
+
         bg_color = C_BG_SIDEBAR[1] if ctk.get_appearance_mode() == "Dark" else C_BG_SIDEBAR[0]
         fg_color = "#FFFFFF" if ctk.get_appearance_mode() == "Dark" else "#000000"
         self.context_menu = tk.Menu(self, tearoff=0, bg=bg_color, fg=fg_color)
+        
+        # --- MENU DE CONTEXTO ATUALIZADO (Renomear e Excluir) ---
+        self.context_menu.add_command(label="✏️ Renomear Pasta", command=lambda: self.rename_folder(self.selected_folder_id))
         self.context_menu.add_command(label="❌ Excluir Pasta", command=lambda: self.delete_folder(self.selected_folder_id))
 
-        def show_context(event, f_id):
+        def show_context(event, f_id, f_name):
             self.selected_folder_id = f_id
+            self.selected_folder_name = f_name # Salva o nome para usar no popup
             try: self.context_menu.tk_popup(event.x_root, event.y_root)
             finally: self.context_menu.grab_release()
 
-        def draw_tree(parent_id, level):
-            current_level_folders = [f for f in all_folders if (f[2] == parent_id if parent_id is not None else f[2] is None)]
+        def create_folder_row(f_id, f_name, level=0, has_children=False, is_expanded=False):
+            row_frame = ctk.CTkFrame(self.folder_scroll, fg_color="transparent")
+            row_frame.pack(fill="x", pady=1)
+            indent_padding = level * 16
+
+            display_name = f_name
+            max_chars = 22 - (level * 2)
+            if len(display_name) > max_chars:
+                display_name = display_name[:max_chars] + "..."
+
+            if has_children and not search_query:
+                icon_name = "chevron_down" if is_expanded else "chevron_right"
+                btn_toggle = ctk.CTkButton(row_frame, text="", image=IconAssets.get_image(icon_name), width=20, height=28,
+                                           fg_color="transparent", hover_color=C_HOVER, command=lambda i=f_id: self.toggle_folder_state(i))
+                btn_toggle.pack(side="left", padx=(indent_padding, 0))
+            else:
+                ctk.CTkLabel(row_frame, text="", width=20).pack(side="left", padx=(indent_padding, 0))
+
+            btn_add_sub = ctk.CTkButton(row_frame, text="+", width=25, height=25, fg_color="transparent", hover_color=C_HOVER,
+                                        text_color=C_TEXT_DIM, font=("Segoe UI", 14), command=lambda i=f_id: self.popup_add_folder(i))
+            btn_add_sub.pack(side="right", padx=(0, 5))
+
+            btn = ctk.CTkButton(row_frame, text=f" {display_name}", image=IconAssets.get_image("folder"), compound="left",
+                                anchor="w", fg_color="transparent", hover_color=C_HOVER, text_color=C_TEXT_DIM, height=28, font=("Segoe UI", 13),
+                                command=lambda i=f_id, n=f_name: self.filter_by_folder(i, n))
+            btn.pack(side="left", fill="x", expand=True, padx=2)
             
-            for f_id, f_name, f_parent in current_level_folders:
-                has_children = any(f[2] == f_id for f in all_folders)
-                row_frame = ctk.CTkFrame(self.folder_scroll, fg_color="transparent")
-                row_frame.pack(fill="x", pady=1)
-                indent_padding = level * 16
+            # Atualizado para passar o nome também
+            btn.bind("<Button-3>", lambda event, i=f_id, n=f_name: show_context(event, i, n))
 
-                if has_children:
+        if search_query:
+            count = 0
+            for f_id, f_name, f_parent in all_folders:
+                if search_query in f_name.lower():
+                    create_folder_row(f_id, f_name, level=0, has_children=False)
+                    count += 1
+            if count == 0:
+                ctk.CTkLabel(self.folder_scroll, text="Nenhuma pasta encontrada", text_color=C_TEXT_DIM, font=("Segoe UI", 12)).pack(pady=10)
+        else:
+            def draw_tree(parent_id, level):
+                current_level_folders = [f for f in all_folders if (f[2] == parent_id if parent_id is not None else f[2] is None)]
+                for f_id, f_name, f_parent in current_level_folders:
+                    has_children = any(f[2] == f_id for f in all_folders)
                     is_expanded = f_id in self.expanded_folders
-                    icon_name = "chevron_down" if is_expanded else "chevron_right"
-                    
-                    btn_toggle = ctk.CTkButton(row_frame, text="", image=IconAssets.get_image(icon_name), width=20, height=28,
-                                               fg_color="transparent", hover_color=C_HOVER, command=lambda i=f_id: self.toggle_folder_state(i))
-                    btn_toggle.pack(side="left", padx=(indent_padding, 0))
-                else:
-                    ctk.CTkLabel(row_frame, text="", width=20).pack(side="left", padx=(indent_padding, 0))
-
-                btn = ctk.CTkButton(row_frame, text=f" {f_name}", image=IconAssets.get_image("folder"), compound="left",
-                                    anchor="w", fg_color="transparent", hover_color=C_HOVER, text_color=C_TEXT_DIM, height=28, font=("Segoe UI", 13),
-                                    command=lambda i=f_id, n=f_name: self.filter_by_folder(i, n))
-                btn.pack(side="left", fill="x", expand=True, padx=2)
-                
-                btn_add_sub = ctk.CTkButton(row_frame, text="+", width=25, height=25, fg_color="transparent", hover_color=C_HOVER,
-                                            text_color=C_TEXT_DIM, font=("Segoe UI", 14), command=lambda i=f_id: self.popup_add_folder(i))
-                btn_add_sub.pack(side="right", padx=(0, 5))
-                btn.bind("<Button-3>", lambda event, i=f_id: show_context(event, i))
-
-                if f_id in self.expanded_folders:
-                    draw_tree(f_id, level + 1)
-        
-        draw_tree(None, 0)
+                    create_folder_row(f_id, f_name, level, has_children, is_expanded)
+                    if has_children and is_expanded:
+                        draw_tree(f_id, level + 1)
+            draw_tree(None, 0)
 
     def popup_add_folder(self, parent_id=None):
         title = "Nova Subpasta" if parent_id else "Nova Pasta Raiz"
@@ -516,6 +621,21 @@ class NotionVaultV8(ctk.CTk):
             self.load_folders_sidebar()
             
         ModernPopups.show_input(parent=self, title=title, placeholder="Nome da pasta...", callback=save_folder)
+
+    # --- NOVA FUNÇÃO DE RENOMEAR ---
+    def rename_folder(self, folder_id):
+        current_name = getattr(self, 'selected_folder_name', "")
+        
+        def save_rename(new_name):
+            if not new_name or new_name == current_name: return
+            conn = sqlite3.connect(self.db_file)
+            conn.execute("UPDATE folders SET name=? WHERE id=?", (new_name, folder_id))
+            conn.commit()
+            conn.close()
+            self.load_folders_sidebar()
+            ModernPopups.show_notify(self, "Pasta renomeada!")
+
+        ModernPopups.show_input(self, "Renomear Pasta", "Novo nome...", save_rename, initial_value=current_name)
 
     def delete_folder(self, folder_id):
         
@@ -629,7 +749,9 @@ class NotionVaultV8(ctk.CTk):
                 self.switch_page("home")
                 self.load_folders_sidebar()
         except:
-            self.entry_login.configure(placeholder_text="Senha Incorreta!")
+            self.entry_login.delete(0, 'end') 
+            self.entry_login.configure(placeholder_text="Senha Incorreta!") 
+            ModernPopups.show_notify(self, "Senha Incorreta! Tente novamente.") 
 
     def lock_app(self):
         self.is_logged_in = False
@@ -645,84 +767,220 @@ class NotionVaultV8(ctk.CTk):
         elif page == "search": self.render_search()
         elif page == "add": self.render_add()
         elif page == "trash": self.render_trash()
+        elif page == "settings": self.render_settings()
 
-    def open_settings(self):
-        dialog, main_frame, is_dark = ModernPopups._create_base_dialog(self, "Configurações", 380, 300)
-        
-        ctk.CTkLabel(main_frame, text="Aparência", font=("Segoe UI", 12, "bold")).pack(pady=(15, 5))
-        ctk.CTkButton(main_frame, text="Alternar Tema (Claro/Escuro)", command=self.toggle_theme).pack(pady=5)
-        
-        ctk.CTkLabel(main_frame, text="Dados", font=("Segoe UI", 12, "bold")).pack(pady=(15, 5))
-        
-        def do_backup():
-            try:
-                
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-                default_name = f"backup_vault_{ts}.db"
-                filename = filedialog.asksaveasfilename(initialfile=default_name, 
-                                                        defaultextension=".db", 
-                                                        filetypes=[("Banco de Dados", "*.db")])
-                if not filename: return
-                
-                shutil.copy(self.db_file, filename)
-                ModernPopups.show_notify(self, f"Backup salvo com sucesso!")
-            except Exception as e: 
-                ModernPopups.show_notify(self, f"Erro no backup: {e}")
+    def render_settings(self):
+        header = ctk.CTkFrame(self.content, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 20))
+        ctk.CTkLabel(header, text="⚙️", font=("Segoe UI", 24)).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(header, text="Configurações", font=("Segoe UI", 28, "bold"), text_color=C_TEXT_MAIN).pack(side="left")
 
-        def do_import():
-            def confirm_import():
-                filename = filedialog.askopenfilename(filetypes=[("Banco de Dados", "*.db")])
-                if not filename: return
-                
+        scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+
+        # --- SEÇÃO PERFIL E SEGURANÇA ---
+        ctk.CTkLabel(scroll, text="PERFIL & SEGURANÇA", font=("Segoe UI", 12, "bold"), text_color=C_TEXT_DIM).pack(anchor="w", pady=(10, 5))
+        sec_frame = ctk.CTkFrame(scroll, fg_color=C_CARD, corner_radius=8)
+        sec_frame.pack(fill="x", pady=(0, 20))
+        
+        ctk.CTkLabel(sec_frame, text="Alterar Senha Mestra", font=("Segoe UI", 14, "bold"), text_color=C_TEXT_MAIN).pack(anchor="w", padx=20, pady=(15, 5))
+        ctk.CTkLabel(sec_frame, text="Isso irá re-criptografar todo o seu banco de dados com a nova senha.", font=("Segoe UI", 12), text_color=C_TEXT_DIM).pack(anchor="w", padx=20, pady=(0, 10))
+        
+        self.old_pwd_entry = ctk.CTkEntry(sec_frame, placeholder_text="Senha Atual", show="*", width=250, fg_color=C_BG_SIDEBAR)
+        self.old_pwd_entry.pack(anchor="w", padx=20, pady=5)
+        self.new_pwd_entry = ctk.CTkEntry(sec_frame, placeholder_text="Nova Senha", show="*", width=250, fg_color=C_BG_SIDEBAR)
+        self.new_pwd_entry.pack(anchor="w", padx=20, pady=5)
+        
+        ctk.CTkButton(sec_frame, text="Atualizar Senha", fg_color=C_ACCENT, width=150, command=self.change_master_password).pack(anchor="w", padx=20, pady=(10, 20))
+
+        # --- SEÇÃO APARÊNCIA ---
+        ctk.CTkLabel(scroll, text="APARÊNCIA", font=("Segoe UI", 12, "bold"), text_color=C_TEXT_DIM).pack(anchor="w", pady=(5, 5))
+        app_frame = ctk.CTkFrame(scroll, fg_color=C_CARD, corner_radius=8)
+        app_frame.pack(fill="x", pady=(0, 20))
+        
+        theme_row = ctk.CTkFrame(app_frame, fg_color="transparent")
+        theme_row.pack(fill="x", padx=20, pady=15)
+        ctk.CTkLabel(theme_row, text="Tema do Aplicativo", font=("Segoe UI", 14), text_color=C_TEXT_MAIN).pack(side="left")
+        ctk.CTkButton(theme_row, text="Alternar Claro/Escuro", fg_color=C_BG_SIDEBAR, text_color=C_TEXT_MAIN, border_width=1, border_color=C_BORDER, hover_color=C_HOVER, command=self.toggle_theme).pack(side="right")
+
+        # --- SEÇÃO GERENCIAR TIPOS ---
+        ctk.CTkLabel(scroll, text="GERENCIAMENTO DE TIPOS", font=("Segoe UI", 12, "bold"), text_color=C_TEXT_DIM).pack(anchor="w", pady=(5, 5))
+        type_frame = ctk.CTkFrame(scroll, fg_color=C_CARD, corner_radius=8)
+        type_frame.pack(fill="x", pady=(0, 20))
+
+        conn = sqlite3.connect(self.db_file)
+        c = conn.cursor()
+        c.execute("SELECT name FROM custom_types")
+        custom_types = c.fetchall()
+        conn.close()
+
+        if not custom_types:
+            ctk.CTkLabel(type_frame, text="Nenhum tipo personalizado criado.", text_color=C_TEXT_DIM).pack(pady=15)
+        else:
+            for (t_name,) in custom_types:
+                row = ctk.CTkFrame(type_frame, fg_color="transparent")
+                row.pack(fill="x", padx=20, pady=5)
+                ctk.CTkLabel(row, text=f"• {t_name}", font=("Segoe UI", 13), text_color=C_TEXT_MAIN).pack(side="left")
+                ctk.CTkButton(row, text="Excluir", fg_color="transparent", text_color="#EB5757", hover_color=C_HOVER, width=60, height=25,
+                              command=lambda n=t_name: self.delete_custom_type_from_settings(n)).pack(side="right")
+
+        ctk.CTkButton(type_frame, text="+ Criar Novo Tipo", fg_color="transparent", border_width=1, border_color=C_BORDER, text_color=C_TEXT_MAIN, 
+                      command=lambda: ModernPopups.show_create_type(self, self.create_type_callback)).pack(pady=15)
+
+        # --- SEÇÃO DADOS E LIXEIRA ---
+        ctk.CTkLabel(scroll, text="DADOS E ARMAZENAMENTO", font=("Segoe UI", 12, "bold"), text_color=C_TEXT_DIM).pack(anchor="w", pady=(5, 5))
+        data_frame = ctk.CTkFrame(scroll, fg_color=C_CARD, corner_radius=8)
+        data_frame.pack(fill="x", pady=(0, 20))
+
+        # Botões de Backup
+        btn_row = ctk.CTkFrame(data_frame, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=15)
+        
+        ctk.CTkButton(btn_row, text="Fazer Backup (.db)", fg_color="#27AE60", hover_color="#219150", width=140, command=self.do_backup).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(btn_row, text="Restaurar Backup", fg_color="#E67E22", hover_color="#D35400", width=140, command=self.do_import).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(btn_row, text="Exportar CSV", fg_color=C_ACCENT, width=140, command=self.do_export).pack(side="left")
+
+        # Divisor
+        ctk.CTkFrame(data_frame, height=1, fg_color=C_BORDER).pack(fill="x", padx=20, pady=5)
+
+        # Lixeira
+        trash_row = ctk.CTkFrame(data_frame, fg_color="transparent")
+        trash_row.pack(fill="x", padx=20, pady=15)
+        ctk.CTkLabel(trash_row, text="Itens Excluídos", font=("Segoe UI", 14), text_color=C_TEXT_MAIN).pack(side="left")
+        ctk.CTkButton(trash_row, text="Acessar Lixeira", fg_color=C_BG_SIDEBAR, text_color=C_TEXT_MAIN, border_width=1, border_color=C_BORDER, hover_color=C_HOVER,
+                      command=lambda: self.switch_page("trash")).pack(side="right")
+
+    def create_type_callback(self, name, fields):
+        conn = sqlite3.connect(self.db_file)
+        try:
+            conn.execute("INSERT INTO custom_types (name, fields) VALUES (?, ?)", (name, fields))
+            conn.commit()
+            ModernPopups.show_notify(self, f"Tipo '{name}' criado!")
+            self.render_settings() # Recarrega a página de settings
+        except sqlite3.IntegrityError:
+            ModernPopups.show_notify(self, "Esse nome já existe!")
+        finally:
+            conn.close()
+
+    def delete_custom_type_from_settings(self, type_name):
+        def confirm():
+            conn = sqlite3.connect(self.db_file)
+            conn.execute("DELETE FROM custom_types WHERE name=?", (type_name,))
+            conn.commit()
+            conn.close()
+            ModernPopups.show_notify(self, "Tipo excluído!")
+            self.render_settings()
+        ModernPopups.show_confirm(self, "Excluir Tipo", f"Tem certeza que deseja excluir '{type_name}'?", confirm)
+
+    def change_master_password(self):
+        old_pwd = self.old_pwd_entry.get()
+        new_pwd = self.new_pwd_entry.get()
+
+        if len(new_pwd) < 6:
+            ModernPopups.show_notify(self, "Nova senha muito curta (mín 6)!")
+            return
+
+        # Verifica senha antiga tentando derivar a chave e decriptar o token
+        with open(self.security_file, "rb") as f:
+            salt = f.read(16)
+            token = f.read()
+        
+        try:
+            old_key = self.get_key_from_password(old_pwd, salt)
+            old_cipher = Fernet(old_key)
+            if old_cipher.decrypt(token) != b"VALIDACAO":
+                raise Exception("Senha errada")
+        except:
+            ModernPopups.show_notify(self, "Senha atual incorreta!")
+            return
+
+        # Se chegou aqui, a senha antiga está certa. Vamos re-criptografar TUDO.
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute("SELECT id, data_blob FROM entries")
+            rows = c.fetchall()
+
+            decrypted_data = []
+            for r_id, blob in rows:
                 try:
-                    
-                    shutil.copy(filename, self.db_file)
-                    
-                    
-                    dir_backup = os.path.dirname(filename)
-                    sec_backup = os.path.join(dir_backup, "security.dat")
-                    if os.path.exists(sec_backup):
-                        shutil.copy(sec_backup, self.security_file)
-                        
-                    ModernPopups.show_notify(self, "Backup restaurado! Reinicie o App.")
-                    self.after(2000, self.destroy)
-                except Exception as e:
-                    ModernPopups.show_notify(self, f"Erro ao importar: {e}")
+                    txt = old_cipher.decrypt(blob.encode()).decode()
+                    decrypted_data.append((r_id, txt))
+                except: pass # Se falhar algum, infelizmente perde-se o dado
+            
+            # Gerar nova chave
+            new_salt = os.urandom(16)
+            new_key = self.get_key_from_password(new_pwd, new_salt)
+            new_cipher = Fernet(new_key)
 
-            ModernPopups.show_confirm(self, "Importar Backup", 
-                                      "Isso substituirá todos os dados atuais. Deseja continuar?", 
-                                      confirm_import, danger=True)
+            # Atualizar banco
+            for r_id, txt in decrypted_data:
+                new_blob = new_cipher.encrypt(txt.encode()).decode()
+                c.execute("UPDATE entries SET data_blob=? WHERE id=?", (new_blob, r_id))
+            
+            conn.commit()
+            conn.close()
 
-        def do_export():
+            # Atualizar arquivo de segurança
+            with open(self.security_file, "wb") as f:
+                f.write(new_salt)
+                f.write(new_cipher.encrypt(b"VALIDACAO"))
+
+            # Atualizar sessão atual
+            self.key = new_key
+            self.cipher = new_cipher
+            
+            self.old_pwd_entry.delete(0, 'end')
+            self.new_pwd_entry.delete(0, 'end')
+            ModernPopups.show_notify(self, "Senha alterada com sucesso!")
+
+        except Exception as e:
+            ModernPopups.show_notify(self, f"Erro crítico: {e}")
+
+    # --- Funções de Backup movidas para métodos da classe ---
+    def do_backup(self):
+        try:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+            default_name = f"backup_vault_{ts}.db"
+            filename = filedialog.asksaveasfilename(initialfile=default_name, defaultextension=".db", filetypes=[("Banco de Dados", "*.db")])
+            if not filename: return
+            shutil.copy(self.db_file, filename)
+            ModernPopups.show_notify(self, "Backup salvo com sucesso!")
+        except Exception as e: ModernPopups.show_notify(self, f"Erro: {e}")
+
+    def do_import(self):
+        def confirm_import():
+            filename = filedialog.askopenfilename(filetypes=[("Banco de Dados", "*.db")])
+            if not filename: return
             try:
-                filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-                if not filename: return
-                
-                conn = sqlite3.connect(self.db_file)
-                c = conn.cursor()
-                c.execute("SELECT type, title, subtitle, data_blob FROM entries WHERE is_deleted=0")
-                rows = c.fetchall()
-                conn.close()
-                
-                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow(['Tipo', 'Título', 'Subtítulo', 'Dados JSON'])
-                    for r in rows:
-                        try:
-                            decrypted = self.decrypt(r[3])
-                            writer.writerow([r[0], r[1], r[2], decrypted])
-                        except: pass
-                ModernPopups.show_notify(self, "Exportado com sucesso!")
-                dialog.destroy()
-            except: ModernPopups.show_notify(self, "Erro ao exportar")
+                shutil.copy(filename, self.db_file)
+                dir_backup = os.path.dirname(filename)
+                sec_backup = os.path.join(dir_backup, "security.dat")
+                if os.path.exists(sec_backup): shutil.copy(sec_backup, self.security_file)
+                ModernPopups.show_notify(self, "Restaurado! Reinicie o App.")
+                self.after(2000, self.destroy)
+            except Exception as e: ModernPopups.show_notify(self, f"Erro: {e}")
+        ModernPopups.show_confirm(self, "Importar Backup", "Isso substituirá todos os dados atuais!", confirm_import, danger=True)
 
-        ctk.CTkButton(main_frame, text="Criar Backup Local (.db)", command=do_backup, fg_color="#27AE60", hover_color="#219150").pack(pady=5)
-        ctk.CTkButton(main_frame, text="Importar Backup (.db)", command=do_import, fg_color="#E67E22", hover_color="#D35400").pack(pady=5)
-        ctk.CTkButton(main_frame, text="Exportar para CSV", command=do_export, fg_color=C_ACCENT).pack(pady=5)
-        
-        ctk.CTkButton(main_frame, text="Fechar", fg_color="transparent", 
-                      border_width=1, border_color=C_BORDER, text_color=C_TEXT_MAIN,
-                      command=dialog.destroy).pack(side="bottom", pady=20)
+    def do_export(self):
+        try:
+            filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+            if not filename: return
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute("SELECT type, title, subtitle, data_blob FROM entries WHERE is_deleted=0")
+            rows = c.fetchall()
+            conn.close()
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Tipo', 'Título', 'Subtítulo', 'Dados JSON'])
+                for r in rows:
+                    try:
+                        decrypted = self.decrypt(r[3])
+                        writer.writerow([r[0], r[1], r[2], decrypted])
+                    except: pass
+            ModernPopups.show_notify(self, "Exportado com sucesso!")
+        except: ModernPopups.show_notify(self, "Erro ao exportar")
 
     def render_home(self):
         header = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -784,19 +1042,46 @@ class NotionVaultV8(ctk.CTk):
         
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
-        c.execute("SELECT title, type FROM entries WHERE is_deleted=0 ORDER BY id DESC LIMIT 3")
+        
+        # --- ATUALIZADO: JOIN PARA PEGAR O ID DA PASTA E O NOME DA PASTA ---
+        c.execute("""
+            SELECT e.title, e.type, e.folder_id, f.name 
+            FROM entries e 
+            LEFT JOIN folders f ON e.folder_id = f.id 
+            WHERE e.is_deleted=0 
+            ORDER BY e.id DESC LIMIT 3
+        """)
         recents = c.fetchall()
         conn.close()
 
         if not recents:
             ctk.CTkLabel(recent_frame, text="Nenhum item ainda.", text_color=C_TEXT_DIM).pack(pady=20)
         else:
-            for title, type_ in recents:
-                r_row = ctk.CTkFrame(recent_frame, fg_color="transparent")
+            for title, type_, f_id, f_name in recents:
+                
+                # Tratamento caso a pasta tenha sido excluída fisicamente ou seja nula
+                if not f_name: f_name = "Sem Pasta"
+
+                r_row = ctk.CTkFrame(recent_frame, fg_color="transparent", cursor="hand2")
                 r_row.pack(fill="x", padx=15, pady=2)
-                ctk.CTkLabel(r_row, text="•", text_color=C_ACCENT).pack(side="left", padx=(0, 5))
-                ctk.CTkLabel(r_row, text=title[:20], font=("Segoe UI", 12), text_color=C_TEXT_MAIN).pack(side="left")
-                ctk.CTkLabel(r_row, text=type_, font=("Segoe UI", 10), text_color=C_TEXT_DIM).pack(side="right")
+                
+                # --- EVENTO DE CLIQUE ---
+                def on_click(event, fid=f_id, fname=f_name):
+                    self.filter_by_folder(fid, fname)
+                
+                r_row.bind("<Button-1>", on_click)
+                
+                lbl_dot = ctk.CTkLabel(r_row, text="•", text_color=C_ACCENT)
+                lbl_dot.pack(side="left", padx=(0, 5))
+                lbl_dot.bind("<Button-1>", on_click)
+
+                lbl_title = ctk.CTkLabel(r_row, text=title[:20], font=("Segoe UI", 12), text_color=C_TEXT_MAIN)
+                lbl_title.pack(side="left")
+                lbl_title.bind("<Button-1>", on_click)
+
+                lbl_type = ctk.CTkLabel(r_row, text=type_, font=("Segoe UI", 10), text_color=C_TEXT_DIM)
+                lbl_type.pack(side="right")
+                lbl_type.bind("<Button-1>", on_click)
 
     def get_folder_path(self, folder_id):
         path = []
@@ -1097,9 +1382,20 @@ class NotionVaultV8(ctk.CTk):
             display_list.append(path)
 
         display_list.sort()
-        display_list.insert(0, "Sem Pasta")
+        
+        # --- VERIFICA SE EXISTEM PASTAS ---
+        self.combo_folder = ctk.CTkComboBox(self.content, values=display_list, width=300, 
+                                            fg_color=C_BG_SIDEBAR, border_color=C_BORDER, 
+                                            text_color=C_TEXT_MAIN)
+        
+        if not display_list:
+            self.combo_folder.set("Nenhuma pasta criada!")
+            self.combo_folder.configure(state="disabled")
+        else:
+            self.combo_folder.configure(state="readonly")
+            if not self.editing_id:
+                self.combo_folder.set(display_list[0])
 
-        self.combo_folder = ctk.CTkComboBox(self.content, values=display_list, width=300, fg_color=C_BG_SIDEBAR, border_color=C_BORDER, text_color=C_TEXT_MAIN)
         self.combo_folder.pack(anchor="w", pady=(5, 15))
 
         ctk.CTkLabel(self.content, text="TIPO", font=("Segoe UI", 10, "bold"), text_color=C_TEXT_DIM).pack(anchor="w")
@@ -1112,11 +1408,17 @@ class NotionVaultV8(ctk.CTk):
         self.combo_type.set("Login")
         self.combo_type.pack(side="left")
 
+        # Botão de Excluir Tipo (NOVO)
+        btn_del_type = ctk.CTkButton(type_row, text="-", width=30, height=28, fg_color=C_BG_SIDEBAR, text_color=C_TEXT_MAIN, 
+                                     border_width=1, border_color=C_BORDER, hover_color=C_HOVER,
+                                     command=self.delete_custom_type)
+        btn_del_type.pack(side="left", padx=5)
+
         if not self.editing_id:
             btn_add_type = ctk.CTkButton(type_row, text="+", width=30, height=28, fg_color=C_BG_SIDEBAR, text_color=C_TEXT_MAIN, 
                                          border_width=1, border_color=C_BORDER, hover_color=C_HOVER,
                                          command=self.create_new_type)
-            btn_add_type.pack(side="left", padx=10)
+            btn_add_type.pack(side="left", padx=5)
 
         self.form_frame = ctk.CTkScrollableFrame(self.content, fg_color="transparent") 
         self.form_frame.pack(fill="both", expand=True)
@@ -1124,6 +1426,24 @@ class NotionVaultV8(ctk.CTk):
         
         if not self.editing_id:
             self.update_form_fields("Login")
+
+    def delete_custom_type(self):
+        current = self.combo_type.get()
+        defaults = ["Login", "Cartão", "Nota", "Link"]
+        
+        if current in defaults:
+            ModernPopups.show_notify(self, "Não é possível excluir tipos padrão!")
+            return
+
+        def confirm():
+            conn = sqlite3.connect(self.db_file)
+            conn.execute("DELETE FROM custom_types WHERE name=?", (current,))
+            conn.commit()
+            conn.close()
+            ModernPopups.show_notify(self, f"Tipo '{current}' excluído!")
+            self.switch_page("add") 
+
+        ModernPopups.show_confirm(self, "Excluir Tipo", f"Deseja excluir o tipo '{current}'?", confirm)
 
     def create_new_type(self):
         def save_new_type(name, fields_str):
@@ -1493,6 +1813,12 @@ class NotionVaultV8(ctk.CTk):
     def save_item(self):
         item_type = self.combo_type.get()
         folder_selection = self.combo_folder.get()
+        
+        # --- VERIFICAÇÃO DE PASTA OBRIGATÓRIA ---
+        if not folder_selection or folder_selection == "Nenhuma pasta criada!":
+            ModernPopups.show_notify(self, "Selecione ou crie uma pasta!")
+            return
+
         data = {}
         for key, widget in self.inputs.items():
             if isinstance(widget, ctk.CTkTextbox): 
@@ -1500,9 +1826,7 @@ class NotionVaultV8(ctk.CTk):
             else: data[key] = widget.get().strip()
         if not data.get("title"): return
 
-        folder_id = None
-        if folder_selection != "Sem Pasta":
-            folder_id = self.folder_map.get(folder_selection)
+        folder_id = self.folder_map.get(folder_selection)
 
         subtitle = ""
         if item_type == "Login": subtitle = data.get("username", "")
@@ -1595,11 +1919,41 @@ class NotionVaultV8(ctk.CTk):
         current = ctk.get_appearance_mode()
         ctk.set_appearance_mode("Light" if current == "Dark" else "Dark")
     def start_move(self, event): self.x_offset = event.x; self.y_offset = event.y
-    def do_move(self, event): x = self.winfo_pointerx() - self.x_offset; y = self.winfo_pointery() - self.y_offset; self.geometry(f"+{x}+{y}")
+    
+    def do_move(self, event): 
+        # Impede mover a janela se estiver em tela cheia
+        if getattr(self, 'is_fullscreen', False):
+            return
+        x = self.winfo_pointerx() - self.x_offset
+        y = self.winfo_pointery() - self.y_offset
+        self.geometry(f"+{x}+{y}")
+        
     def resize_window(self, event):
+        # Impede redimensionar se estiver em tela cheia
+        if getattr(self, 'is_fullscreen', False):
+            return
         new_width = self.winfo_width() + (event.x_root - self.winfo_rootx() - self.winfo_width())
         new_height = self.winfo_height() + (event.y_root - self.winfo_rooty() - self.winfo_height())
         if new_width > 400 and new_height > 300: self.geometry(f"{new_width}x{new_height}")
+
+    def toggle_fullscreen(self):
+        if not self.is_fullscreen:
+            # Salva geometria anterior
+            self.last_geometry = self.geometry()
+            self.is_fullscreen = True
+            
+            # Maximiza (Muda para ícone de restaurar)
+            self.btn_max.configure(text="❐")
+            
+            # Define o tamanho para o tamanho da tela
+            w = self.winfo_screenwidth()
+            h = self.winfo_screenheight()
+            self.geometry(f"{w}x{h}+0+0")
+        else:
+            # Restaura (Muda para ícone de quadrado)
+            self.is_fullscreen = False
+            self.btn_max.configure(text="□")
+            self.geometry(self.last_geometry)
 
     def close_app(self): self.destroy()
     def clear_content(self): 
